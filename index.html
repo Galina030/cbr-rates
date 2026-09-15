@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Курсы валют ЦБ РФ</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--line:#e3e8ef;--text:#1a2233;--muted:#6b7688;--accent:#2b5fd9}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:16px}
+.wrap{max-width:900px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:14px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
+select,input{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:15px;background:#fff}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.col{flex:1;min-width:140px}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer}
+button.ghost{background:#eef2fb;color:var(--accent)}
+.result{font-size:24px;font-weight:600;margin-top:12px}
+.note{color:var(--muted);font-size:13px;margin-top:6px}
+.tabs{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.tabs button{background:#eef2fb;color:var(--accent);padding:6px 12px;font-size:14px}
+.tabs button.on{background:var(--accent);color:#fff}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Курсы валют ЦБ РФ</h1>
+<div class="sub" id="asof">загрузка...</div>
+
+<div class="card">
+  <div class="row">
+    <div class="col"><label>Сумма</label><input id="amount" type="number" value="100" min="0" step="any"></div>
+    <div class="col"><label>Из</label><select id="from"></select></div>
+    <div class="col"><label>В</label><select id="to"></select></div>
+    <div class="col" style="flex:0 0 auto;display:flex;align-items:flex-end"><button class="ghost" id="swap">Поменять</button></div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div class="col" style="max-width:200px"><label>На дату</label><input id="date" type="date"></div>
+  </div>
+  <div class="result" id="result"></div>
+  <div class="note" id="note"></div>
+</div>
+
+<div class="card">
+  <div class="tabs">
+    <button data-days="7" class="on">Неделя</button>
+    <button data-days="30">Месяц</button>
+    <button data-days="90">3 месяца</button>
+    <button data-days="365">Год</button>
+  </div>
+  <canvas id="chart" height="120"></canvas>
+  <div class="note" id="chartnote"></div>
+</div>
+</div>
+
+<script>
+const RUB = {id:"RUB", code:"RUB", name:"Российский рубль", rate:1};
+let daily, history, chart, days = 7;
+
+function fmt(n){return n.toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:4});}
+function iso(d){return d.toISOString().slice(0,10);}
+function ruDate(s){const p=s.split("-");return p[2]+"."+p[1]+"."+p[0];}
+
+function rateOn(cur, dateIso){
+  if(cur.id === "RUB") return {rate:1, date:dateIso, exact:true};
+  const points = history[cur.id] || {};
+  if(points[dateIso] !== undefined) return {rate:points[dateIso], date:dateIso, exact:true};
+  const earlier = Object.keys(points).filter(d => d <= dateIso).sort();
+  if(!earlier.length) return null;
+  const last = earlier[earlier.length-1];
+  return {rate:points[last], date:last, exact:false};
+}
+
+function convert(){
+  const from = byId(document.getElementById("from").value);
+  const to = byId(document.getElementById("to").value);
+  const amount = parseFloat(document.getElementById("amount").value);
+  const d = document.getElementById("date").value;
+  const res = document.getElementById("result");
+  const note = document.getElementById("note");
+
+  if(isNaN(amount)){res.textContent = ""; note.textContent = "Введите сумму"; return;}
+
+  const rf = rateOn(from, d), rt = rateOn(to, d);
+  if(!rf || !rt){res.textContent=""; note.textContent="На эту дату данных нет"; return;}
+
+  const value = amount * rf.rate / rt.rate;
+  res.textContent = fmt(amount)+" "+from.code+" = "+fmt(value)+" "+to.code;
+
+  const notes = [];
+  if(!rf.exact || !rt.exact){
+    const used = !rf.exact ? rf.date : rt.date;
+    notes.push("На "+ruDate(d)+" курс не устанавливался, действует курс от "+ruDate(used)+".");
+  }
+  if(from.id !== "RUB" && to.id !== "RUB"){
+    notes.push("Курс между этими валютами рассчитан через рубль, ЦБ РФ его не устанавливает.");
+  }
+  note.textContent = notes.join(" ");
+  drawChart();
+}
+
+function byId(id){return id === "RUB" ? RUB : daily.currencies.find(c => c.id === id);}
+
+function drawChart(){
+  const from = byId(document.getElementById("from").value);
+  const to = byId(document.getElementById("to").value);
+  const end = new Date();
+  const start = new Date(); start.setDate(end.getDate() - days);
+
+  const dates = new Set();
+  [from, to].forEach(c => { if(c.id !== "RUB") Object.keys(history[c.id]||{}).forEach(d => dates.add(d)); });
+  const list = [...dates].filter(d => d >= iso(start) && d <= iso(end)).sort();
+
+  const values = list.map(d => {
+    const rf = rateOn(from, d), rt = rateOn(to, d);
+    return rf && rt ? rf.rate / rt.rate : null;
+  });
+
+  document.getElementById("chartnote").textContent =
+    "1 "+from.code+" в "+to.code+". Точек: "+list.length+". Выходные и праздники ЦБ не публикует.";
+
+  const cfg = {
+    type:"line",
+    data:{labels:list.map(ruDate), datasets:[{data:values, borderColor:"#2b5fd9", backgroundColor:"rgba(43,95,217,.08)", fill:true, tension:.25, pointRadius:2, spanGaps:true}]},
+    options:{plugins:{legend:{display:false}}, scales:{y:{beginAtZero:false}}}
+  };
+  if(chart) chart.destroy();
+  chart = new Chart(document.getElementById("chart"), cfg);
+}
+
+async function init(){
+  daily = await (await fetch("data/daily.json?"+Date.now())).json();
+  history = await (await fetch("data/history.json?"+Date.now())).json();
+
+  document.getElementById("asof").textContent = "Официальные курсы на "+daily.date;
+
+  const opts = [RUB, ...daily.currencies]
+    .map(c => `<option value="${c.id}">${c.code} — ${c.name}</option>`).join("");
+  document.getElementById("from").innerHTML = opts;
+  document.getElementById("to").innerHTML = opts;
+  document.getElementById("from").value = "R01235";
+  document.getElementById("to").value = "RUB";
+
+  const today = iso(new Date());
+  const dateInput = document.getElementById("date");
+  dateInput.value = today;
+  dateInput.max = today;
+
+  ["amount","from","to","date"].forEach(id =>
+    document.getElementById(id).addEventListener("input", convert));
+
+  document.getElementById("swap").addEventListener("click", () => {
+    const f = document.getElementById("from"), t = document.getElementById("to");
+    [f.value, t.value] = [t.value, f.value];
+    convert();
+  });
+
+  document.querySelectorAll(".tabs button").forEach(b =>
+    b.addEventListener("click", () => {
+      document.querySelectorAll(".tabs button").forEach(x => x.classList.remove("on"));
+      b.classList.add("on");
+      days = +b.dataset.days;
+      drawChart();
+    }));
+
+  convert();
+}
+
+init();
+</script>
+</body>
+</html>
